@@ -130,11 +130,23 @@ export interface RehearsalMark {
   createdAt: string
 }
 
+export interface LoopPreset {
+  id: string
+  name: string
+  startMeasureIndex: number
+  startOccurrence: number
+  endMeasureIndex: number
+  endOccurrence: number
+  loops: number
+  createdAt: string
+}
+
 export interface StoredProject {
   id: string
   name: string
   originalXml: string
   marks: RehearsalMark[]
+  loopPresets: LoopPreset[]
   updatedAt: string
   createdAt: string
 }

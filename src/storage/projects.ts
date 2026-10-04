@@ -29,7 +29,13 @@ export async function listProjects(): Promise<StoredProject[]> {
   const database = await openDatabase()
   try {
     const result = await requestPromise(database.transaction(storeName, 'readonly').objectStore(storeName).getAll())
-    return result.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    return result
+      .map((item) => ({
+        ...item,
+        marks: Array.isArray(item.marks) ? item.marks : [],
+        loopPresets: sanitizePresets(item.loopPresets),
+      }))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   } finally {
     database.close()
   }
@@ -60,6 +66,7 @@ export function createProject(name: string, originalXml: string): StoredProject 
     name,
     originalXml,
     marks: [],
+    loopPresets: [],
     updatedAt: now,
     createdAt: now,
   }
@@ -90,7 +97,28 @@ export async function importProjectFile(file: File): Promise<StoredProject> {
   }
   return {
     ...parsed.project,
+    marks: Array.isArray(parsed.project.marks) ? parsed.project.marks : [],
+    loopPresets: sanitizePresets(parsed.project.loopPresets),
     id: crypto.randomUUID(),
     updatedAt: new Date().toISOString(),
   }
+}
+
+function sanitizePresets(value: unknown): StoredProject['loopPresets'] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is StoredProject['loopPresets'][number] =>
+      Boolean(item) &&
+      typeof item.id === 'string' &&
+      Number.isInteger(item.startMeasureIndex) &&
+      Number.isInteger(item.startOccurrence) &&
+      Number.isInteger(item.endMeasureIndex) &&
+      Number.isInteger(item.endOccurrence) &&
+      Number.isInteger(item.loops) &&
+      item.loops >= 1)
+    .map((item) => ({
+      ...item,
+      name: typeof item.name === 'string' ? item.name : '循环练习',
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+    }))
 }

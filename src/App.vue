@@ -76,7 +76,7 @@
           </label>
           <div class="timeline">
             <div class="timeline-bar"><div :style="{ width: `${playProgress * 100}%` }" /></div>
-            <span>{{ formatTime(currentScoreTime) }} / {{ path ? formatTime(path.totalSeconds) : '0:00.0' }}</span>
+            <span>{{ formatTime(activeMode === 'loop' ? loopTime : currentScoreTime) }} / {{ activeMode === 'loop' ? formatTime(activeLoopDuration) : path ? formatTime(path.totalSeconds) : '0:00.0' }}</span>
           </div>
         </div>
 
@@ -116,6 +116,66 @@
             >
               第 {{ occurrence }} 次到达 · {{ arrivalDescription(occurrence) }}
             </button>
+            <div v-if="selectedOccurrences.length" class="arrival-loop-actions">
+              <button class="button secondary" @click="setLoopEndpoint('start')">设为循环起点</button>
+              <button class="button secondary" @click="setLoopEndpoint('end')">设为循环终点</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel loop-panel">
+          <h2>循环练习预设</h2>
+          <div class="loop-form">
+            <input v-model="loopName" placeholder="预设名，如 第二遍第3小节→跳房2第6小节" />
+            <div class="loop-endpoints">
+              <label>
+                起点
+                <select v-model.number="loopStartStepIndex" :disabled="!path">
+                  <option v-for="option in pathStepOptions" :key="`s-${option.value}`" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                终点
+                <select v-model.number="loopEndStepIndex" :disabled="!path">
+                  <option v-for="option in pathStepOptions" :key="`e-${option.value}`" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+              <label class="loop-count">
+                循环次数
+                <input v-model.number="loopLoops" type="number" min="1" max="99" step="1" :disabled="!path" />
+              </label>
+            </div>
+            <p class="loop-preview">{{ draftLoopSummary }}</p>
+            <p v-if="draftLoopIssue" class="loop-issue">{{ draftLoopIssue }}</p>
+            <div class="loop-actions">
+              <button class="button primary" :disabled="!project || Boolean(draftLoopIssue)" @click="saveLoopPreset">保存预设到本工程</button>
+              <button class="button secondary" :disabled="!project || Boolean(draftLoopIssue)" @click="startDraftLoop">立即练习此段</button>
+            </div>
+          </div>
+
+          <div class="preset-list">
+            <p v-if="!project?.loopPresets.length" class="muted">还没有循环预设。端点按“实际路径节点”选择，第二次到达与第一次明确分开。</p>
+            <article v-for="preset in project?.loopPresets ?? []" :key="preset.id" :class="{ active: activeLoopId === preset.id }">
+              <strong>{{ preset.name }}</strong>
+              <p>{{ presetSummary(preset) }}</p>
+              <p v-if="presetIssue(preset)" class="loop-issue">{{ presetIssue(preset) }}</p>
+              <div class="preset-actions">
+                <button class="button primary" :disabled="Boolean(presetIssue(preset))" @click="startPresetLoop(preset)">
+                  {{ activeLoopId === preset.id && playing ? '循环进行中…' : '启动循环' }}
+                </button>
+                <button v-if="activeLoopId === preset.id" class="button secondary" @click="stopPlayback">停止</button>
+                <button class="danger" @click="removeLoopPreset(preset.id)">删除预设</button>
+              </div>
+            </article>
+          </div>
+
+          <div v-if="activeMode === 'loop'" class="loop-status">
+            <span :class="['loop-state', playing ? 'playing' : 'paused']">{{ playing ? '循环播放中' : '已暂停' }}</span>
+            <strong>第 {{ currentLoopRound }} / {{ activeLoopPreset?.loops ?? '-' }} 轮</strong>
           </div>
         </section>
 
@@ -182,8 +242,9 @@ import {
   saveProject,
 } from './storage/projects'
 import { arrivalsFor, buildPerformancePath, formatTime, parseMusicXml, type ParsedScore } from './score/parser'
+import { resolveLoopSegment, roundAt } from './score/loop'
 import { sampleLibrary } from './score/samples'
-import type { RehearsalMark, StoredProject } from './score/types'
+import type { LoopPreset, PathStep, RehearsalMark, StoredProject } from './score/types'
 
 const projects = ref<StoredProject[]>([])
 const project = ref<StoredProject | null>(null)
@@ -197,12 +258,92 @@ const playing = ref(false)
 const markLabel = ref('')
 const markComment = ref('')
 const beatEvents = ref<BeatEvent[]>([])
+const loopName = ref('')
+const loopStartStepIndex = ref(0)
+const loopEndStepIndex = ref(0)
+const loopLoops = ref(4)
+const activeLoopId = ref<string | null>(null)
+const loopBeatEvents = ref<BeatEvent[]>([])
+const loopSegmentDuration = ref(0)
+const loopTime = ref(0)
+const currentLoopRound = ref(1)
 let metronome: Metronome | null = null
 let rafHandle = 0
+type PlayMode = 'full' | 'loop'
+const activeMode = ref<PlayMode>('full')
 
 const selectedMeasure = computed(() => score.value?.measures[selectedMeasureIndex.value] ?? null)
 const selectedOccurrences = computed(() => path.value ? arrivalsFor(path.value, selectedMeasureIndex.value) : [])
-const playProgress = computed(() => path.value && path.value.totalSeconds > 0 ? currentScoreTime.value / path.value.totalSeconds : 0)
+const playProgress = computed(() => {
+  if (activeMode.value === 'loop') {
+    return loopSegmentDuration.value > 0 ? Math.min(1, (loopTime.value % loopSegmentDuration.value) / loopSegmentDuration.value) : 0
+  }
+  return path.value && path.value.totalSeconds > 0 ? currentScoreTime.value / path.value.totalSeconds : 0
+})
+const activeLoopPreset = computed(() => project.value?.loopPresets.find((preset) => preset.id === activeLoopId.value) ?? null)
+const activeLoopDuration = computed(() => loopSegmentDuration.value * (activeLoopPreset.value?.loops ?? 1))
+
+const pathStepOptions = computed(() => {
+  if (!path.value) return []
+  return path.value.steps.map((step, index) => ({
+    value: index,
+    label: describeStep(step, index),
+  }))
+})
+
+function describeStep(step: PathStep, index: number): string {
+  const pickup = step.isPickup ? '（弱起）' : ''
+  const ending = step.activeEndingNumbers.length ? ` · 跳房 ${step.activeEndingNumbers.join('/')}` : ''
+  return `#${index + 1} 小节 ${step.measureNumber}${pickup} 第 ${step.occurrence} 次到达 · ${step.event} · ♩=${Math.round(step.bpm)}${ending}`
+}
+
+function stepAsPresetEndpoint(stepIndex: number): { measureIndex: number; occurrence: number } | null {
+  const step = path.value?.steps[stepIndex]
+  return step ? { measureIndex: step.measureIndex, occurrence: step.occurrence } : null
+}
+
+function draftPreset(): LoopPreset | null {
+  const start = stepAsPresetEndpoint(loopStartStepIndex.value)
+  const end = stepAsPresetEndpoint(loopEndStepIndex.value)
+  if (!start || !end || !path.value) return null
+  return {
+    id: 'draft',
+    name: loopName.value.trim() || '未命名循环',
+    startMeasureIndex: start.measureIndex,
+    startOccurrence: start.occurrence,
+    endMeasureIndex: end.measureIndex,
+    endOccurrence: end.occurrence,
+    loops: Math.max(1, Math.floor(loopLoops.value) || 1),
+    createdAt: new Date().toISOString(),
+  }
+}
+
+const draftLoopSummary = computed(() => {
+  const preset = draftPreset()
+  if (!preset) return '请在实际路径中选择起止节点。'
+  const result = resolveLoopSegment(path.value, preset)
+  if (!result.valid || !result.segment) return result.message ?? ''
+  return `${describeStep(path.value!.steps[result.segment.startStepIndex], result.segment.startStepIndex)} → ${describeStep(path.value!.steps[result.segment.endStepIndex], result.segment.endStepIndex)}，每轮 ${formatTime(result.segment.durationSeconds)}。`
+})
+
+const draftLoopIssue = computed(() => {
+  const preset = draftPreset()
+  if (!preset) return '请在实际路径中选择起止节点。'
+  const result = resolveLoopSegment(path.value, preset)
+  return result.valid ? '' : result.message ?? '所选段落不可用。'
+})
+
+function presetSummary(preset: LoopPreset): string {
+  const result = resolveLoopSegment(path.value, preset)
+  if (!result.valid || !result.segment || !path.value) {
+    return `小节 ${preset.startMeasureIndex + 1} 第 ${preset.startOccurrence} 次 → 小节 ${preset.endMeasureIndex + 1} 第 ${preset.endOccurrence} 次 · ${preset.loops} 轮`
+  }
+  return `${describeStep(path.value.steps[result.segment.startStepIndex], result.segment.startStepIndex)} → ${describeStep(path.value.steps[result.segment.endStepIndex], result.segment.endStepIndex)} · ${preset.loops} 轮 · 每轮 ${formatTime(result.segment.durationSeconds)}`
+}
+
+function presetIssue(preset: LoopPreset): string {
+  return resolveLoopSegment(path.value, preset).message ?? ''
+}
 
 async function refreshProjectList(): Promise<void> {
   projects.value = await listProjects()
@@ -215,6 +356,10 @@ function analyze(xml: string): void {
   beatEvents.value = buildBeatEvents(path.value.steps, parsed.measures)
   selectedMeasureIndex.value = 0
   selectedOccurrence.value = path.value.arrivals[0]?.occurrences[0] ?? 1
+  loopStartStepIndex.value = 0
+  loopEndStepIndex.value = Math.max(0, path.value.steps.length - 1)
+  activeLoopId.value = null
+  activeMode.value = 'full'
   stopPlayback()
 }
 
@@ -291,7 +436,18 @@ function seekToStep(index: number): void {
     currentScoreTime.value = step.startSeconds
     selectedMeasureIndex.value = step.measureIndex
     selectedOccurrence.value = step.occurrence
+    if (activeMode.value === 'loop' && !playing.value) {
+      activeMode.value = 'full'
+      activeLoopId.value = null
+    }
   }
+}
+
+function setLoopEndpoint(which: 'start' | 'end'): void {
+  const index = findSelectedStepIndex()
+  if (index < 0) return
+  if (which === 'start') loopStartStepIndex.value = index
+  else loopEndStepIndex.value = index
 }
 
 function chooseMeasure(measureIndex: number): void {
@@ -308,21 +464,111 @@ function findSelectedStepIndex(): number {
   ) ?? -1
 }
 
+function ensureMetronome(): Metronome {
+  metronome ??= new Metronome(
+    (event) => {
+      activeStepIndex.value = event.stepIndex
+    },
+    () => {
+      finishPlayback()
+    },
+  )
+  return metronome
+}
+
 async function startPlayback(): Promise<void> {
   if (!path.value) return
+  if (activeMode.value === 'loop' && activeLoopId.value) {
+    await resumeLoopPlayback()
+    return
+  }
   let stepIndex = findSelectedStepIndex()
   if (stepIndex < 0) stepIndex = 0
   const startTime = path.value.steps[stepIndex]?.startSeconds ?? 0
-  metronome ??= new Metronome((event) => {
-    activeStepIndex.value = event.stepIndex
-  })
-  await metronome.start(beatEvents.value, currentScoreTime.value >= startTime ? currentScoreTime.value : startTime)
+  await ensureMetronome().start(
+    beatEvents.value,
+    currentScoreTime.value >= startTime ? currentScoreTime.value : startTime,
+  )
   playing.value = true
   tick()
 }
 
+async function startPresetLoop(preset: LoopPreset): Promise<void> {
+  if (!path.value || !score.value) return
+  if (activeLoopId.value !== preset.id) stopPlayback()
+  const result = resolveLoopSegment(path.value, preset)
+  if (!result.valid || !result.segment) {
+    window.alert(result.message ?? '循环段落不可用，不会播放。')
+    return
+  }
+  const { startStepIndex, endStepIndex, durationSeconds } = result.segment
+  loopBeatEvents.value = buildBeatEvents(path.value.steps, score.value.measures, {
+    rebaseToZero: true,
+    firstStepIndex: startStepIndex,
+    lastStepIndex: endStepIndex,
+  })
+  loopSegmentDuration.value = durationSeconds
+  activeLoopId.value = preset.id
+  activeMode.value = 'loop'
+  activeStepIndex.value = startStepIndex
+  loopTime.value = 0
+  currentLoopRound.value = 1
+  await ensureMetronome().start(loopBeatEvents.value, 0, { durationSeconds, loops: preset.loops })
+  playing.value = true
+  tick()
+}
+
+async function resumeLoopPlayback(): Promise<void> {
+  const preset = activeLoopPreset.value
+  if (!preset || !path.value || !score.value) return
+  if (loopTime.value >= loopSegmentDuration.value * preset.loops - 0.001) loopTime.value = 0
+  await ensureMetronome().start(
+    loopBeatEvents.value,
+    loopTime.value,
+    { durationSeconds: loopSegmentDuration.value, loops: preset.loops },
+  )
+  playing.value = true
+  tick()
+}
+
+async function startDraftLoop(): Promise<void> {
+  if (draftLoopIssue.value || !project.value) return
+  const preset = draftPreset()
+  if (!preset) return
+  preset.id = crypto.randomUUID()
+  project.value.loopPresets.push(preset)
+  activeLoopId.value = preset.id
+  await startPresetLoop(preset)
+}
+
+function saveLoopPreset(): void {
+  if (!project.value || draftLoopIssue.value) return
+  const preset = draftPreset()
+  if (!preset) return
+  preset.id = crypto.randomUUID()
+  project.value.loopPresets.push(preset)
+  loopName.value = ''
+  void saveCurrentProject()
+}
+
+function removeLoopPreset(id: string): void {
+  if (!project.value) return
+  if (activeLoopId.value === id) stopPlayback()
+  project.value.loopPresets = project.value.loopPresets.filter((preset) => preset.id !== id)
+  void saveCurrentProject()
+}
+
 function tick(): void {
   if (!metronome || !playing.value) return
+  if (activeMode.value === 'loop') {
+    loopTime.value = metronome.currentTime
+    const preset = activeLoopPreset.value
+    if (preset) currentLoopRound.value = roundAt(loopTime.value, loopSegmentDuration.value, preset.loops)
+    const position = metronome.positionAt(loopTime.value)
+    if (position) activeStepIndex.value = position.stepIndex
+    rafHandle = window.requestAnimationFrame(tick)
+    return
+  }
   currentScoreTime.value = metronome.currentTime
   const position = metronome.positionAt(currentScoreTime.value)
   if (position) activeStepIndex.value = position.stepIndex
@@ -333,8 +579,17 @@ function tick(): void {
   rafHandle = window.requestAnimationFrame(tick)
 }
 
+/** 全部轮次自然结束：停止节拍器但保留最后位置，界面显示停止状态。 */
+function finishPlayback(): void {
+  playing.value = false
+  cancelAnimationFrame(rafHandle)
+}
+
 function pausePlayback(): void {
-  if (metronome) currentScoreTime.value = metronome.currentTime
+  if (metronome) {
+    if (activeMode.value === 'loop') loopTime.value = metronome.currentTime
+    else currentScoreTime.value = metronome.currentTime
+  }
   metronome?.stop()
   playing.value = false
   cancelAnimationFrame(rafHandle)
@@ -344,9 +599,17 @@ function stopPlayback(): void {
   metronome?.stop()
   playing.value = false
   cancelAnimationFrame(rafHandle)
-  const firstIndex = findSelectedStepIndex()
-  activeStepIndex.value = firstIndex >= 0 ? firstIndex : null
-  currentScoreTime.value = firstIndex >= 0 ? path.value?.steps[firstIndex].startSeconds ?? 0 : 0
+  if (activeMode.value === 'loop') {
+    const preset = activeLoopPreset.value
+    const start = preset && path.value ? resolveLoopSegment(path.value, preset).segment?.startStepIndex ?? null : null
+    activeStepIndex.value = start
+    loopTime.value = 0
+    currentLoopRound.value = 1
+  } else {
+    const firstIndex = findSelectedStepIndex()
+    activeStepIndex.value = firstIndex >= 0 ? firstIndex : null
+    currentScoreTime.value = firstIndex >= 0 ? path.value?.steps[firstIndex].startSeconds ?? 0 : 0
+  }
 }
 
 async function togglePlayback(): Promise<void> {

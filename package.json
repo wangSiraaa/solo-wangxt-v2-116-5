@@ -7,6 +7,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc --noEmit && vite build",
     "test:path": "node --import tsx scripts/test-parser.ts",
+    "test:loop": "node --import tsx scripts/test-loop.ts",
+    "test": "npm run test:path && npm run test:loop",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

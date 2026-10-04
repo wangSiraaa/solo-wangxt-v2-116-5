@@ -189,3 +189,63 @@ button, input, select, textarea { font: inherit; }
 .warning.error { background: rgba(220, 70, 70, .13); border: 1px solid rgba(238, 91, 91, .32); }
 .warning.warning { background: rgba(240, 170, 50, .12); border: 1px solid rgba(240, 170, 50, .28); }
 .warning.info { background: rgba(70, 130, 230, .12); border: 1px solid rgba(100, 150, 245, .25); }
+
+.loop-panel { }
+.loop-form { display: grid; gap: 8px; margin-bottom: 12px; }
+.loop-form input {
+  background: #111620;
+  color: #e8edf5;
+  border: 1px solid #354057;
+  border-radius: 7px;
+  padding: 7px 8px;
+}
+.loop-endpoints { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.loop-endpoints label { display: grid; gap: 4px; font-size: 12px; color: #98a4b8; }
+.loop-endpoints select {
+  background: #111620;
+  color: #e8edf5;
+  border: 1px solid #354057;
+  border-radius: 7px;
+  padding: 7px 8px;
+  min-width: 0;
+}
+.loop-endpoints .loop-count { grid-column: 1 / -1; }
+.loop-count input {
+  background: #111620;
+  color: #e8edf5;
+  border: 1px solid #354057;
+  border-radius: 7px;
+  padding: 7px 8px;
+}
+.loop-preview { margin: 0; color: #aebdd4; font-size: 12px; line-height: 1.5; }
+.loop-issue { margin: 0; color: #ff9b9b; font-size: 12px; line-height: 1.5; }
+.loop-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.preset-list { display: grid; gap: 8px; }
+.preset-list article {
+  background: #121927;
+  border: 1px solid #2b354a;
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+.preset-list article.active { border-color: #6788ff; background: #172542; }
+.preset-list article p { margin: 0; font-size: 12px; color: #b9c6db; line-height: 1.5; }
+.preset-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.preset-actions .danger { font-size: 12px; }
+.loop-status {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: #0f1626;
+  border: 1px solid #2c3a58;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+.loop-state { border-radius: 999px; padding: 3px 10px; font-weight: 700; font-size: 12px; }
+.loop-state.playing { background: rgba(60, 190, 120, .16); color: #70df99; }
+.loop-state.paused { background: rgba(240, 170, 50, .16); color: #f2c767; }
+.arrival-loop-actions { display: flex; gap: 6px; margin-top: 4px; }
+.arrival-loop-actions .button { flex: 1; padding: 6px 8px; font-size: 12px; }
