@@ -58,6 +58,12 @@
         <div class="transport panel">
           <button class="button primary" :disabled="!path" @click="togglePlayback">{{ playing ? '暂停' : '播放/节拍' }}</button>
           <button class="button secondary" :disabled="!path" @click="stopPlayback">停止</button>
+          <div v-if="activeLoopPreset" class="loop-chip">
+            <span :class="['loop-state', loopState]">{{ loopStateLabel }}</span>
+            <span class="loop-chip-text">循环「{{ activeLoopPreset.name }}」 · 第 {{ loopRound }} / {{ activeLoopPreset.loops }} 轮</span>
+            <button class="button secondary" @click="toggleLoop(activeLoopPreset)">{{ loopButtonLabel(activeLoopPreset) }}</button>
+            <button v-if="loopState !== 'idle'" class="button secondary" @click="stopLoop(true)">停止</button>
+          </div>
           <label>
             起始书面小节
             <select v-model.number="selectedMeasureIndex" :disabled="!score">
@@ -138,6 +144,73 @@
           </div>
         </section>
 
+        <section class="panel loop-panel">
+          <h2>循环练习预设</h2>
+          <div class="loop-form">
+            <input v-model="loopName" placeholder="预设名，如：副歌第二遍" />
+            <div class="loop-endpoint">
+              <span>起点</span>
+              <select v-model.number="loopStartMeasure" :disabled="!score">
+                <option v-for="measure in score?.measures ?? []" :key="measure.index" :value="measure.index">
+                  小节 {{ measure.number }}
+                </option>
+              </select>
+              <select v-model.number="loopStartOccurrence" :disabled="!loopStartOccurrences.length">
+                <option v-for="occurrence in loopStartOccurrences" :key="occurrence" :value="occurrence">
+                  第 {{ occurrence }} 次到达
+                </option>
+              </select>
+              <button class="loop-use-current" :disabled="!selectedOccurrences.length" @click="useSelectionAsLoopStart">用当前到达</button>
+            </div>
+            <div class="loop-endpoint">
+              <span>终点</span>
+              <select v-model.number="loopEndMeasure" :disabled="!score">
+                <option v-for="measure in score?.measures ?? []" :key="measure.index" :value="measure.index">
+                  小节 {{ measure.number }}
+                </option>
+              </select>
+              <select v-model.number="loopEndOccurrence" :disabled="!loopEndOccurrences.length">
+                <option v-for="occurrence in loopEndOccurrences" :key="occurrence" :value="occurrence">
+                  第 {{ occurrence }} 次到达
+                </option>
+              </select>
+              <button class="loop-use-current" :disabled="!selectedOccurrences.length" @click="useSelectionAsLoopEnd">用当前到达</button>
+            </div>
+            <div class="loop-count-row">
+              <label>
+                循环次数
+                <input v-model.number="loopCount" type="number" min="1" max="99" />
+              </label>
+              <button class="button primary" :disabled="!project || !path" @click="saveLoopPreset">保存预设</button>
+            </div>
+            <p v-if="loopFormError" class="loop-error">{{ loopFormError }}</p>
+          </div>
+          <div v-if="!loopPresets.length" class="muted">还没有循环预设。从实际路径选择起止到达位置后保存。</div>
+          <div class="loop-list">
+            <article v-for="preset in loopPresets" :key="preset.id" :class="{ active: preset.id === activeLoopPresetId }">
+              <div class="loop-row-head">
+                <strong>{{ preset.name }}</strong>
+                <span v-if="preset.id === activeLoopPresetId" :class="['loop-state', loopState]">{{ loopStateLabel }}</span>
+              </div>
+              <small>{{ describePreset(preset) }}</small>
+              <p v-if="resolutionOf(preset).error" class="loop-error">{{ resolutionOf(preset).error }}</p>
+              <div v-if="preset.id === activeLoopPresetId" class="loop-status">
+                <span>第 {{ loopRound }} / {{ preset.loops }} 轮</span>
+                <div class="timeline-bar"><div :style="{ width: `${loopProgress * 100}%` }" /></div>
+              </div>
+              <div class="loop-actions">
+                <button class="button secondary" :disabled="!resolutionOf(preset).ok" @click="toggleLoop(preset)">
+                  {{ loopButtonLabel(preset) }}
+                </button>
+                <button v-if="preset.id === activeLoopPresetId && loopState !== 'idle'" class="button secondary" @click="stopLoop(true)">
+                  停止
+                </button>
+                <button class="danger" @click="removeLoopPreset(preset.id)">删除</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section class="panel">
           <h2>排练标记（独立保存）</h2>
           <div class="mark-form">
@@ -171,7 +244,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ScoreView from './components/ScoreView.vue'
-import { buildBeatEvents, Metronome, type BeatEvent } from './audio/metronome'
+import { buildBeatEvents, buildLoopTimeline, Metronome, type BeatEvent } from './audio/metronome'
 import {
   createProject,
   deleteProject,
@@ -182,8 +255,9 @@ import {
   saveProject,
 } from './storage/projects'
 import { arrivalsFor, buildPerformancePath, formatTime, parseMusicXml, type ParsedScore } from './score/parser'
+import { resolveLoopPreset, type ResolvedLoop } from './score/loop'
 import { sampleLibrary } from './score/samples'
-import type { RehearsalMark, StoredProject } from './score/types'
+import type { LoopPreset, RehearsalMark, StoredProject } from './score/types'
 
 const projects = ref<StoredProject[]>([])
 const project = ref<StoredProject | null>(null)
@@ -200,9 +274,40 @@ const beatEvents = ref<BeatEvent[]>([])
 let metronome: Metronome | null = null
 let rafHandle = 0
 
+type LoopPlayState = 'playing' | 'paused' | 'idle'
+
+const loopName = ref('')
+const loopStartMeasure = ref(0)
+const loopStartOccurrence = ref(1)
+const loopEndMeasure = ref(0)
+const loopEndOccurrence = ref(1)
+const loopCount = ref(4)
+const loopFormError = ref('')
+const loopState = ref<LoopPlayState>('idle')
+const loopRound = ref(0)
+const loopTime = ref(0)
+const loopSegmentSeconds = ref(0)
+const loopTotalSeconds = ref(0)
+const activeLoopPresetId = ref<string | null>(null)
+let loopMetronome: Metronome | null = null
+let loopRafHandle = 0
+let pausedLoopTime = 0
+
 const selectedMeasure = computed(() => score.value?.measures[selectedMeasureIndex.value] ?? null)
 const selectedOccurrences = computed(() => path.value ? arrivalsFor(path.value, selectedMeasureIndex.value) : [])
 const playProgress = computed(() => path.value && path.value.totalSeconds > 0 ? currentScoreTime.value / path.value.totalSeconds : 0)
+
+const loopPresets = computed(() => project.value?.loopPresets ?? [])
+const loopStartOccurrences = computed(() => path.value ? arrivalsFor(path.value, loopStartMeasure.value) : [])
+const loopEndOccurrences = computed(() => path.value ? arrivalsFor(path.value, loopEndMeasure.value) : [])
+const loopResolutions = computed(() => {
+  const map = new Map<string, ResolvedLoop>()
+  for (const preset of loopPresets.value) map.set(preset.id, resolveLoopPreset(path.value, preset))
+  return map
+})
+const activeLoopPreset = computed(() => loopPresets.value.find((preset) => preset.id === activeLoopPresetId.value) ?? null)
+const loopStateLabel = computed(() => loopState.value === 'playing' ? '播放中' : loopState.value === 'paused' ? '已暂停' : '已停止')
+const loopProgress = computed(() => loopTotalSeconds.value > 0 ? Math.min(1, loopTime.value / loopTotalSeconds.value) : 0)
 
 async function refreshProjectList(): Promise<void> {
   projects.value = await listProjects()
@@ -215,6 +320,12 @@ function analyze(xml: string): void {
   beatEvents.value = buildBeatEvents(path.value.steps, parsed.measures)
   selectedMeasureIndex.value = 0
   selectedOccurrence.value = path.value.arrivals[0]?.occurrences[0] ?? 1
+  loopStartMeasure.value = 0
+  loopStartOccurrence.value = 1
+  loopEndMeasure.value = 0
+  loopEndOccurrence.value = 1
+  loopFormError.value = ''
+  stopLoop()
   stopPlayback()
 }
 
@@ -241,7 +352,10 @@ async function onFileSelected(event: Event): Promise<void> {
 }
 
 function loadStoredProject(item: StoredProject): void {
-  project.value = JSON.parse(JSON.stringify(item)) as StoredProject
+  const clone = JSON.parse(JSON.stringify(item)) as StoredProject
+  clone.marks ??= []
+  clone.loopPresets ??= []
+  project.value = clone
   analyze(project.value.originalXml)
 }
 
@@ -310,6 +424,7 @@ function findSelectedStepIndex(): number {
 
 async function startPlayback(): Promise<void> {
   if (!path.value) return
+  stopLoop()
   let stepIndex = findSelectedStepIndex()
   if (stepIndex < 0) stepIndex = 0
   const startTime = path.value.steps[stepIndex]?.startSeconds ?? 0
@@ -352,6 +467,142 @@ function stopPlayback(): void {
 async function togglePlayback(): Promise<void> {
   if (playing.value) pausePlayback()
   else await startPlayback()
+}
+
+function resolutionOf(preset: LoopPreset): ResolvedLoop {
+  return loopResolutions.value.get(preset.id) ?? resolveLoopPreset(path.value, preset)
+}
+
+function describePreset(preset: LoopPreset): string {
+  const startNumber = score.value?.measures[preset.startMeasureIndex]?.number ?? '?'
+  const endNumber = score.value?.measures[preset.endMeasureIndex]?.number ?? '?'
+  return `小节 ${startNumber} 第 ${preset.startOccurrence} 次 → 小节 ${endNumber} 第 ${preset.endOccurrence} 次 · ${preset.loops} 轮`
+}
+
+function loopButtonLabel(preset: LoopPreset): string {
+  if (preset.id !== activeLoopPresetId.value) return '播放'
+  if (loopState.value === 'playing') return '暂停'
+  if (loopState.value === 'paused') return '继续'
+  return '重新播放'
+}
+
+function useSelectionAsLoopStart(): void {
+  loopStartMeasure.value = selectedMeasureIndex.value
+  loopStartOccurrence.value = selectedOccurrence.value
+}
+
+function useSelectionAsLoopEnd(): void {
+  loopEndMeasure.value = selectedMeasureIndex.value
+  loopEndOccurrence.value = selectedOccurrence.value
+}
+
+function saveLoopPreset(): void {
+  if (!project.value) return
+  loopFormError.value = ''
+  const preset: LoopPreset = {
+    id: crypto.randomUUID(),
+    name: loopName.value.trim() || `循环练习 ${loopPresets.value.length + 1}`,
+    startMeasureIndex: loopStartMeasure.value,
+    startOccurrence: loopStartOccurrence.value,
+    endMeasureIndex: loopEndMeasure.value,
+    endOccurrence: loopEndOccurrence.value,
+    loops: Math.max(1, Math.floor(loopCount.value) || 1),
+    createdAt: new Date().toISOString(),
+  }
+  const resolution = resolveLoopPreset(path.value, preset)
+  if (!resolution.ok) {
+    loopFormError.value = resolution.error ?? '当前选段不能用于循环。'
+    return
+  }
+  project.value.loopPresets.push(preset)
+  loopName.value = ''
+  void saveCurrentProject()
+}
+
+function removeLoopPreset(id: string): void {
+  if (!project.value) return
+  if (activeLoopPresetId.value === id) stopLoop()
+  project.value.loopPresets = project.value.loopPresets.filter((preset) => preset.id !== id)
+  void saveCurrentProject()
+}
+
+async function startLoop(preset: LoopPreset, fromTime = 0): Promise<void> {
+  const resolution = resolveLoopPreset(path.value, preset)
+  if (!resolution.ok || !path.value) return
+  if (playing.value) pausePlayback()
+  stopLoop()
+  const stepSet = new Set(resolution.stepIndices)
+  const segmentEvents = beatEvents.value.filter((event) => stepSet.has(event.stepIndex))
+  const segmentStart = path.value.steps[resolution.startStepIndex].startSeconds
+  const expanded = buildLoopTimeline(segmentEvents, segmentStart, resolution.segmentSeconds, resolution.loops)
+  if (!expanded.length) return
+  loopSegmentSeconds.value = resolution.segmentSeconds
+  loopTotalSeconds.value = resolution.segmentSeconds * resolution.loops
+  activeLoopPresetId.value = preset.id
+  loopMetronome ??= new Metronome((event) => {
+    activeStepIndex.value = event.stepIndex
+  })
+  await loopMetronome.start(expanded, fromTime)
+  loopState.value = 'playing'
+  loopTime.value = fromTime
+  loopRound.value = Math.min(resolution.loops, Math.floor(fromTime / resolution.segmentSeconds) + 1)
+  loopTick()
+}
+
+function loopTick(): void {
+  if (!loopMetronome || loopState.value !== 'playing') return
+  loopTime.value = loopMetronome.currentTime
+  const preset = activeLoopPreset.value
+  if (preset && loopSegmentSeconds.value > 0) {
+    loopRound.value = Math.min(preset.loops, Math.floor(loopTime.value / loopSegmentSeconds.value) + 1)
+  }
+  const position = loopMetronome.positionAt(loopTime.value)
+  if (position) activeStepIndex.value = position.stepIndex
+  if (loopTime.value >= loopTotalSeconds.value) {
+    finishLoop()
+    return
+  }
+  loopRafHandle = window.requestAnimationFrame(loopTick)
+}
+
+function finishLoop(): void {
+  loopMetronome?.stop()
+  cancelAnimationFrame(loopRafHandle)
+  loopState.value = 'idle'
+  const preset = activeLoopPreset.value
+  if (preset) loopRound.value = preset.loops
+  loopTime.value = loopTotalSeconds.value
+}
+
+function pauseLoop(): void {
+  if (loopMetronome) pausedLoopTime = loopMetronome.currentTime
+  loopMetronome?.stop()
+  loopState.value = 'paused'
+  cancelAnimationFrame(loopRafHandle)
+}
+
+function stopLoop(keepStatus = false): void {
+  loopMetronome?.stop()
+  cancelAnimationFrame(loopRafHandle)
+  loopState.value = 'idle'
+  loopTime.value = 0
+  pausedLoopTime = 0
+  if (!keepStatus) {
+    activeLoopPresetId.value = null
+    loopRound.value = 0
+  }
+}
+
+async function toggleLoop(preset: LoopPreset): Promise<void> {
+  if (activeLoopPresetId.value === preset.id && loopState.value === 'playing') {
+    pauseLoop()
+    return
+  }
+  if (activeLoopPresetId.value === preset.id && loopState.value === 'paused') {
+    await startLoop(preset, pausedLoopTime)
+    return
+  }
+  await startLoop(preset, 0)
 }
 
 function arrivalDescription(occurrence: number): string {
@@ -397,12 +648,23 @@ watch(selectedOccurrence, () => {
   if (index >= 0 && activeStepIndex.value !== index) seekToStep(index)
 })
 
+watch(loopStartMeasure, () => {
+  const occurrences = loopStartOccurrences.value
+  if (!occurrences.includes(loopStartOccurrence.value)) loopStartOccurrence.value = occurrences[0] ?? 1
+})
+
+watch(loopEndMeasure, () => {
+  const occurrences = loopEndOccurrences.value
+  if (!occurrences.includes(loopEndOccurrence.value)) loopEndOccurrence.value = occurrences[0] ?? 1
+})
+
 watch(project, () => {
   if (project.value) void saveProject(project.value).then(refreshProjectList)
 }, { deep: true })
 
 onBeforeUnmount(() => {
   stopPlayback()
+  stopLoop()
 })
 
 void refreshProjectList()

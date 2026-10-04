@@ -60,6 +60,7 @@ export function createProject(name: string, originalXml: string): StoredProject 
     name,
     originalXml,
     marks: [],
+    loopPresets: [],
     updatedAt: now,
     createdAt: now,
   }
@@ -91,6 +92,8 @@ export async function importProjectFile(file: File): Promise<StoredProject> {
   return {
     ...parsed.project,
     id: crypto.randomUUID(),
+    marks: Array.isArray(parsed.project.marks) ? parsed.project.marks : [],
+    loopPresets: Array.isArray(parsed.project.loopPresets) ? parsed.project.loopPresets : [],
     updatedAt: new Date().toISOString(),
   }
 }

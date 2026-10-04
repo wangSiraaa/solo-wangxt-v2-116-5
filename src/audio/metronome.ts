@@ -46,6 +46,22 @@ export function buildBeatEvents(steps: PathStep[], measures: WrittenMeasure[]): 
   return events
 }
 
+export function buildLoopTimeline(
+  segmentEvents: BeatEvent[],
+  segmentStartSeconds: number,
+  segmentSeconds: number,
+  loops: number,
+): BeatEvent[] {
+  const expanded: BeatEvent[] = []
+  for (let round = 0; round < loops; round += 1) {
+    const offset = round * segmentSeconds - segmentStartSeconds
+    for (const event of segmentEvents) {
+      expanded.push({ ...event, id: `loop-${round}-${event.id}`, time: event.time + offset })
+    }
+  }
+  return expanded
+}
+
 export class Metronome {
   private context: AudioContext | null = null
   private timer: number | null = null
